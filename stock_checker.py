@@ -1,97 +1,144 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
-import time
+import requests
+import json
 import logging
-import os
+import time
+from bs4 import BeautifulSoup
 from datetime import datetime
+import os
+import re
 
-logger = logging.getLogger("CromaStockAlert.checker")
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("croma_stock_alert.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("CromaStockAlert")
 
-def check_stock_with_selenium(url, product_name):
-    """
-    Check if a product is in stock on Croma by examining the Add to Cart button
-    
-    Args:
-        url (str): URL of the product page on Croma
-        product_name (str): Name of the product for logging
-        
-    Returns:
-        bool: True if product is in stock, False otherwise
-    """
-    logger.info(f"Checking stock for {product_name}")
-    
-    # Set up Chrome options
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")  # Run headless to avoid browser UI
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-    
-    # Add realistic user agent to avoid detection
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-    
-    # Initialize driver
-    driver = None
+def check_stock_with_requests(url, product_name):
+    """Improved stock checking function with better detection logic"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.croma.com/',
+        'Connection': 'keep-alive',
+        # Additional headers to appear more like a real browser
+        'sec-ch-ua': '"Chromium";v="114", "Google Chrome";v="114"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+    }
     
     try:
-        logger.debug("Initializing Chrome driver")
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+        logger.info(f"Checking stock for {product_name} at {url}")
+        response = requests.get(url, headers=headers, timeout=15)
         
-        # Navigate to the product page
-        logger.debug(f"Navigating to {url}")
-        driver.get(url)
-        
-        # Wait for page to load completely
-        time.sleep(5)
-        
-        # Take screenshot for debugging
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        screenshot_path = f"screenshots/{product_name.replace(' ', '_')}_{timestamp}.png"
-        driver.save_screenshot(screenshot_path)
-        logger.debug(f"Saved screenshot to {screenshot_path}")
-        
-        # Check for Add to Cart button
-        logger.debug("Looking for Add to Cart button")
-        add_to_cart_selectors = [
-            'button[data-testid="add-to-cart"]',
-            'button.pdp-action',
-            'button.add-to-cart',
-            'button.buy-button',
-            'button.addToCart',
-            '[data-testid="addToCartButton"]'
-        ]
-        
-        # Try different selector patterns for the Add to Cart button
-        for selector in add_to_cart_selectors:
-            buttons = driver.find_elements(By.CSS_SELECTOR, selector)
-            if buttons:
-                logger.debug(f"Found {len(buttons)} button(s) matching selector: {selector}")
-                
-                # Check if any button is not disabled
-                for button in buttons:
-                    is_disabled = button.get_attribute('disabled') == 'true' or 'disabled' in button.get_attribute('class')
-                    button_text = button.text.strip()
+        if response.status_code == 200:
+            logger.info(f"Successfully loaded page for {product_name}")
+            
+            # Create directory for HTML responses if it doesn't exist
+            os.makedirs("responses", exist_ok=True)
+            
+            # Save the response for debugging
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"responses/{product_name.replace(' ', '_')}_{timestamp}.html"
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            logger.info(f"Saved HTML response to {filename} for inspection")
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            page_text = response.text.lower()
+            
+            # DETECTION METHOD 1: Check for explicit "In Stock" text
+            stock_status_elements = soup.select('.stock-status, .pdp-stock, [data-testid="stock-status"]')
+            for element in stock_status_elements:
+                text = element.text.strip().lower()
+                logger.info(f"Found stock status element with text: '{text}'")
+                if "in stock" in text:
+                    logger.info(f"✅ Product {product_name} is IN STOCK! (Found 'in stock' text)")
+                    return True
+                if any(x in text for x in ["out of stock", "sold out", "currently unavailable"]):
+                    logger.info(f"❌ Product {product_name} is OUT OF STOCK (Found out of stock text)")
+                    return False
+            
+            # DETECTION METHOD 2: Check for Add to Cart buttons
+            add_to_cart_patterns = [
+                'button[data-testid="add-to-cart"]',
+                '.pdp-action', 
+                '.add-to-cart',
+                '.buy-button',
+                '[data-testid="addToCartButton"]',
+                'button:contains("Add to Cart")',
+                'button:contains("Buy Now")'
+            ]
+            
+            for pattern in add_to_cart_patterns:
+                elements = soup.select(pattern)
+                if elements:
+                    logger.info(f"Found {len(elements)} potential add-to-cart elements with selector '{pattern}'")
                     
-                    logger.debug(f"Button text: '{button_text}', Disabled: {is_disabled}")
+                    for element in elements:
+                        element_html = str(element)
+                        element_text = element.text.strip()
+                        
+                        logger.info(f"Button text: '{element_text}', HTML snippet: '{element_html[:100]}...'")
+                        
+                        # Check if button is disabled
+                        disabled = ('disabled' in element.get('class', []) or 
+                                   element.get('disabled') == 'disabled' or
+                                   'disabled' in element_html.lower())
+                        
+                        if not disabled and ('add to cart' in element_text.lower() or 'buy now' in element_text.lower()):
+                            logger.info(f"✅ Product {product_name} is IN STOCK! (Found enabled Add to Cart button)")
+                            return True
+            
+            # DETECTION METHOD 3: Look for any indication of "Out of Stock"
+            out_of_stock_indicators = ['out of stock', 'sold out', 'currently unavailable', 'coming soon']
+            for indicator in out_of_stock_indicators:
+                if indicator in page_text:
+                    logger.info(f"❌ Product {product_name} is OUT OF STOCK (found text: '{indicator}')")
+                    return False
+            
+            # DETECTION METHOD 4: Check for price display (usually indicates in stock)
+            price_elements = soup.select('.price, .pdp-price, [data-testid="price"]')
+            if price_elements:
+                # Look for price pattern (₹XX,XXX) to confirm it's actually a price
+                for element in price_elements:
+                    price_text = element.text.strip()
+                    logger.info(f"Found price element with text: '{price_text}'")
                     
-                    # If button is not disabled and contains relevant text, product is in stock
-                    if not is_disabled and any(text in button_text.lower() for text in ['add to cart', 'buy now']):
-                        logger.info(f"Product {product_name} is IN STOCK! (Add to Cart button is enabled)")
+                    # Indian Rupee price pattern
+                    if re.search(r'₹\s*[\d,]+', price_text):
+                        logger.info(f"✅ Product {product_name} shows price, likely IN STOCK")
                         return True
-        
-        # If we couldn't find an enabled Add to Cart button, product is out of stock
-        logger.info(f"Product {product_name} is OUT OF STOCK (Add to Cart button is disabled or not found)")
-        return False
-        
+            
+            # DETECTION METHOD 5: Delivery availability usually indicates in stock
+            delivery_elements = soup.select('.delivery-details, .delivery-info, [data-testid="delivery"]')
+            for element in delivery_elements:
+                delivery_text = element.text.strip().lower()
+                logger.info(f"Found delivery element with text: '{delivery_text}'")
+                
+                if 'delivery' in delivery_text and not any(x in delivery_text for x in ["unavailable", "not available"]):
+                    logger.info(f"✅ Product {product_name} shows delivery options, likely IN STOCK")
+                    return True
+            
+            # If we couldn't definitively determine, check if there are any strong indicators of availability
+            if ('add to cart' in page_text and not any(x in page_text for x in out_of_stock_indicators)):
+                logger.info(f"✅ Product {product_name} likely IN STOCK (Add to Cart text found without Out of Stock indicators)")
+                return True
+                
+            logger.info(f"⚠️ Couldn't definitively determine stock status for {product_name}, defaulting to OUT OF STOCK")
+            return False
+            
+        else:
+            logger.error(f"Failed to load page for {product_name}. Status code: {response.status_code}")
+            return False
+    
     except Exception as e:
         logger.error(f"Error checking stock for {product_name}: {str(e)}")
         return False
-        
-    finally:
-        if driver:
-            driver.quit()
-            logger.debug("Chrome driver closed")
+
+# The rest of the script (main function, etc.) remains the same as before
