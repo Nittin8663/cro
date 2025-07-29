@@ -1,5 +1,7 @@
 import logging
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -22,14 +24,23 @@ class CromaProductChecker:
         return logger
 
     def _setup_webdriver(self) -> webdriver.Chrome:
-        options = webdriver.ChromeOptions()
-        options.add_argument('--headless')  # Run in headless mode
-        options.add_argument('--disable-gpu')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        # Add a realistic user agent
-        options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36')
-        return webdriver.Chrome(options=options)
+        # Install ChromeDriver if not present
+        try:
+            options = webdriver.ChromeOptions()
+            options.add_argument('--headless')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            # Add chrome binary location if needed
+            options.binary_location = "/usr/bin/chromium-browser"  # for Ubuntu/Debian
+            options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36')
+            
+            # Setup ChromeDriver using webdriver_manager
+            service = Service(ChromeDriverManager().install())
+            return webdriver.Chrome(service=service, options=options)
+        except Exception as e:
+            self.logger.error(f"Failed to setup WebDriver: {str(e)}")
+            raise
 
     def check_availability(self, url: str, pincode: str) -> Dict:
         """
